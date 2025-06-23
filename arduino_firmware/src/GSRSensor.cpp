@@ -18,4 +18,6 @@ void GSRSensor::update(HealthData &data) {
     data.gsr = filteredValue;
     // (The raw value 0-1023 is stored. Conversion to actual conductance or microSiemens 
     // would require knowing the sensor's circuit. Here we use the raw value as an index.)
+    // Note: GSR is typically a relative measure, so we don't need to convert to absolute units.
+    // And also the stress level calculator normalizes the level based on the GSR range.
 }
