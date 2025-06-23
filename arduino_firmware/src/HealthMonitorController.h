@@ -9,6 +9,7 @@
 #include "StressCalculator.h"
 #include "ArrhythmiaDetector.h"
 #include "BLECommunicator.h"
+#include "ActivityDetector.h"
 
 class HealthMonitorController {
 public:
@@ -39,6 +40,8 @@ private:
     // Timing for BLE transmissions
     const unsigned long SEND_INTERVAL_MS = 1000;
     unsigned long lastSendTime = 0;
+    // Activity detector to check if user is active
+    ActivityDetector activityDetector;
 };
 
 #endif // HEALTH_MONITOR_CONTROLLER_H

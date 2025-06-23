@@ -12,11 +12,12 @@ struct HealthData {
     float stressLevel;         // Stress level (0-100 index)
     bool  arrhythmiaDetected;  // Arrhythmia flag
     bool  tremorDetected;      // Tremor detected flag
+    bool active;              // Activity status (true if user is active)
 
     HealthData() : 
         heartRate(0.0f), spo2(0.0f), bodyTemp(0.0f), gsr(0.0f),
         hrv(0.0f), stressLevel(0.0f),
-        arrhythmiaDetected(false), tremorDetected(false)
+        arrhythmiaDetected(false), tremorDetected(false), active(false)
     {}
 };
 
