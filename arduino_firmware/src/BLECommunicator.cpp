@@ -34,7 +34,8 @@ void BLECommunicator::sendData(const HealthData &data) {
         "\"hrv\":%.1f,"          // HRV (ms) with one decimal
         "\"stress\":%.0f,"       // stress level as integer
         "\"arr\":%s,"            // arrhythmia flag (true/false)
-        "\"tremor\":%s"          // tremor flag (true/false)
+        "\"tremor\":%s,"          // tremor flag (true/false)
+        "\"active\":%s"          // activity status (true/false)
         "}",
         data.heartRate,
         data.spo2,
@@ -43,7 +44,8 @@ void BLECommunicator::sendData(const HealthData &data) {
         data.hrv,
         data.stressLevel,
         data.arrhythmiaDetected ? "true" : "false",
-        data.tremorDetected ? "true" : "false"
+        data.tremorDetected ? "true" : "false",
+        data.active ? "true" : "false"
     );
     // Update characteristic value and notify central
     dataChar.writeValue((const uint8_t*)jsonBuffer, strlen(jsonBuffer));

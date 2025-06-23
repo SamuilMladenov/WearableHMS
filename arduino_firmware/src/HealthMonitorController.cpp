@@ -45,6 +45,13 @@ void HealthMonitorController::update() {
         }
         heartSensor.beatDetected = false; // reset flag
     }
+    // Update activity status based on motion sensor
+    float ax = motionSensor.getLastAx();
+    float ay = motionSensor.getLastAy();
+    float az = motionSensor.getLastAz();
+
+    activityDetector.update(ax, ay, az);
+
 
     // Decide if it's time to send an update (e.g., every 1000 ms)
     unsigned long now = millis();
@@ -53,6 +60,7 @@ void HealthMonitorController::update() {
         currentData.hrv = hrvCalculator.computeSDNN();
         currentData.stressLevel = stressCalculator.computeStress(currentData);
         currentData.arrhythmiaDetected = arrDetector.checkForArrhythmia(currentData.heartRate, hrvCalculator);
+        currentData.active = activityDetector.isActive();
         // (currentData.tremorDetected is updated in motionSensor.update())
         // Send data via BLE
         bleComm.sendData(currentData);
