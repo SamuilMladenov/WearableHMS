@@ -1,7 +1,6 @@
 #ifndef HEALTH_MONITOR_CONTROLLER_H
 #define HEALTH_MONITOR_CONTROLLER_H
 
-#include "Max30102Sensor.h"
 #include "GSRSensor.h"
 #include "MLX90614Sensor.h"
 #include "MPU6050Sensor.h"
@@ -25,7 +24,6 @@ public:
 
 private:
     // Sensor objects
-    Max30102Sensor heartSensor;
     GSRSensor gsrSensor;
     MLX90614Sensor tempSensor;
     MPU6050Sensor motionSensor;

@@ -5,7 +5,7 @@ bool HealthMonitorController::begin() {
     bool ok = true;
     // Initialize all sensors
     if (!heartSensor.begin()) {
-        Serial.println("ERROR: MAX30102 not found!");
+        Serial.println("ERROR: Hearth sensor not found!");
         ok = false;
     }
     if (!gsrSensor.begin()) {
