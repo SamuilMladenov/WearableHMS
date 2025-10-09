@@ -18,7 +18,7 @@ bool HealthMonitorController::begin() {
     }
     if (!motionSensor.begin()) {
         Serial.println("ERROR: MPU6050 not found!");
-        ok = false;
+        ok = false
     }
     // Initialize BLE communication
     if (!bleComm.begin()) {
