@@ -4,7 +4,7 @@
 
 class GSR {
 public:
-    GSR();
+    GSR(uint8_t pin = A0);
     bool begin(uint8_t pin = A0);
     float readGSR();
     void printDiagnostics();

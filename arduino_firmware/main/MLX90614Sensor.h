@@ -8,12 +8,12 @@ public:
     MLX90614();
     bool begin(uint8_t address = 0x5A);
     float readTemperature();
+    float readAmbientTemperature();
     void printDiagnostics();
     
 private:
     uint8_t _address;
     bool _initialized;
     
-    float readTemp(uint8_t reg);
-    bool checkConnection();
+    bool readRegister16(uint8_t reg, uint16_t &value);
 };
