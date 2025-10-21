@@ -9,9 +9,12 @@ public:
     bool begin(uint8_t address = 0x64, uint32_t i2cSpeed = 100000);
     bool readFifoData(uint16_t &sample);
     bool readFifoData(uint16_t *samples, uint8_t count);
+    bool readFifoDataDual(uint16_t &redSample, uint16_t &irSample);
     uint8_t getFifoWordCount();
     void printDiagnostics();
     void reset();
+    bool configureForHeartRate();
+    bool configureForSpO2();
     
 private:
     uint8_t _address;
@@ -30,6 +33,7 @@ private:
     static const uint8_t REG_NUM_AVG = 0x15;
     static const uint8_t REG_PD_LED_CFG = 0x14;
     static const uint8_t REG_LED1_DRV = 0x23;
+    static const uint8_t REG_LED2_DRV = 0x24;
     static const uint8_t REG_CLK32K = 0x4B;
     static const uint8_t REG_FIFO_DATA = 0x60;
     

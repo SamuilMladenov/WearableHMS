@@ -57,6 +57,22 @@ bool ADPD105::readFifoData(uint16_t *samples, uint8_t count) {
     return readFifoWords(samples, count);
 }
 
+bool ADPD105::readFifoDataDual(uint16_t &redSample, uint16_t &irSample) {
+    if (!_initialized) return false;
+    
+    uint8_t wordCount = getFifoWordCount();
+    if (wordCount < 2) return false;
+    
+    uint16_t samples[2];
+    if (!readFifoWords(samples, 2)) return false;
+    
+    // Slot A (RED) comes first, then Slot B (IR)
+    redSample = samples[0];
+    irSample = samples[1];
+    
+    return true;
+}
+
 uint8_t ADPD105::getFifoWordCount() {
     if (!_initialized) return 0;
     
@@ -122,9 +138,15 @@ bool ADPD105::readFifoWords(uint16_t *buf, uint8_t n) {
 }
 
 bool ADPD105::configureMinimal() {
-    // Use the proven working configuration
+    // Default configuration - calls configureForHeartRate
+    return configureForHeartRate();
+}
+
+bool ADPD105::configureForHeartRate() {
+    // Configuration for heart rate only (RED LED only, Slot A)
+    Serial.println("  Configuring for Heart Rate (RED LED only)");
     
-    // 1) Enable the 32 kHz sample clock (working value)
+    // 1) Enable the 32 kHz sample clock
     if (!writeRegister16(REG_CLK32K, 0x4C92)) {
         Serial.println("ADPD105: CLK32K config failed");
         return false;
@@ -148,19 +170,19 @@ bool ADPD105::configureMinimal() {
         return false;
     }
 
-    // 5) Photodiode/LED mapping - CRITICAL FOR LED LIGHTING
+    // 5) Photodiode/LED mapping - RED LED
     if (!writeRegister16(REG_PD_LED_CFG, 0x0551)) {
         Serial.println("ADPD105: PD_LED_CFG config failed");
         return false;
     }
 
-    // 6) LED1 current - THIS SHOULD LIGHT THE LED
+    // 6) LED1 (RED) current
     if (!writeRegister16(REG_LED1_DRV, 0x2001)) {
         Serial.println("ADPD105: LED1_DRV config failed");
         return false;
     }
 
-    // 7) FIFO config & enable Slot A
+    // 7) FIFO config & enable Slot A only
     if (!writeRegister16(REG_SLOT_EN, 0x1005)) {
         Serial.println("ADPD105: SLOT_EN config failed");
         return false;
@@ -172,6 +194,78 @@ bool ADPD105::configureMinimal() {
         return false;
     }
 
+    return true;
+}
+
+bool ADPD105::configureForSpO2() {
+    // Configuration for SpO2 (RED and IR LEDs, Slots A and B)
+    Serial.println("  Configuring for SpO2 (RED + IR LEDs)");
+    
+    // 1) Standby mode first
+    if (!writeRegister16(REG_MODE, 0x0001)) {
+        Serial.println("ADPD105: MODE config failed");
+        return false;
+    }
+    delay(10);
+    
+    // 2) Enable the 32 kHz sample clock
+    if (!writeRegister16(REG_CLK32K, 0x4C92)) {
+        Serial.println("ADPD105: CLK32K config failed");
+        return false;
+    }
+
+    // 3) Sampling frequency: 100 Hz
+    if (!writeRegister16(REG_FSAMPLE, 0x0050)) {
+        Serial.println("ADPD105: FSAMPLE config failed");
+        return false;
+    }
+
+    // 4) No averaging
+    if (!writeRegister16(REG_NUM_AVG, 0x0000)) {
+        Serial.println("ADPD105: NUM_AVG config failed");
+        return false;
+    }
+
+    // 5) Photodiode/LED mapping for both slots
+    if (!writeRegister16(REG_PD_LED_CFG, 0x0551)) {
+        Serial.println("ADPD105: PD_LED_CFG config failed");
+        return false;
+    }
+
+    // 6) LED1 (RED) current for Slot A - keep same as heart rate
+    if (!writeRegister16(REG_LED1_DRV, 0x2001)) {
+        Serial.println("ADPD105: LED1_DRV config failed");
+        return false;
+    }
+
+    // 7) LED2 (IR) current for Slot B - REDUCED to prevent saturation
+    // Changed from 0x2001 to 0x0401 (much lower current)
+    if (!writeRegister16(REG_LED2_DRV, 0x0401)) {
+        Serial.println("ADPD105: LED2_DRV config failed");
+        return false;
+    }
+
+    // 8) FIFO threshold
+    if (!writeRegister16(REG_FIFO_THRESH, 0x0010)) {
+        Serial.println("ADPD105: FIFO_THRESH config failed");
+        return false;
+    }
+
+    // 9) Enable BOTH Slot A (RED) and Slot B (IR)
+    if (!writeRegister16(REG_SLOT_EN, 0x3005)) {
+        Serial.println("ADPD105: SLOT_EN config failed");
+        return false;
+    }
+
+    delay(10);
+
+    // 10) Normal mode (start state machine)
+    if (!writeRegister16(REG_MODE, 0x0002)) {
+        Serial.println("ADPD105: Normal mode start failed");
+        return false;
+    }
+
+    Serial.println("  SpO2 configuration complete");
     return true;
 }
 
