@@ -6,7 +6,7 @@
 class ADPD105 {
 public:
     ADPD105();
-    bool begin(uint8_t address = 0x64, uint32_t i2cSpeed = 100000);
+    bool begin(uint8_t address = 0x64, uint32_t i2cSpeed = 100000, bool forSpO2 = false);
     bool readFifoData(uint16_t &sample);
     bool readFifoData(uint16_t *samples, uint8_t count);
     bool readFifoDataDual(uint16_t &redSample, uint16_t &irSample);
