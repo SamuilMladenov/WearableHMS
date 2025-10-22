@@ -4,6 +4,7 @@
 #include "MPU6050Sensor.h"
 #include "GSR.h"
 #include "HeartRateCalculator.h"
+#include "SpO2Calculator.h"
 
 // Sensor objects
 ADPD105 heartSensor;
@@ -14,9 +15,11 @@ GSR gsrSensor;
 // Heart rate calculator
 HeartRateCalculator hrCalc(500); // 500 threshold (adjust as needed)
 
+
 // State machine for sequential sensor reading
 enum SensorState {
   STATE_HEART,
+  STATE_SPO2,
   STATE_TEMP,
   STATE_GYRO,
   STATE_GSR,
@@ -25,9 +28,11 @@ enum SensorState {
 
 SensorState currentState = STATE_HEART;
 unsigned long stateStartTime = 0;
+SpO2Calculator spo2Calc;
 
 // Timing constants (in milliseconds)
 const unsigned long HEART_DURATION = 20000;  // 20 seconds for heart rate
+const unsigned long SPO2_DURATION = 10000;    // 10 seconds for SpO2
 const unsigned long TEMP_DURATION = 3000;     // 3 seconds for temperature
 const unsigned long GYRO_DURATION = 3000;     // 3 seconds for gyroscope
 const unsigned long GSR_DURATION = 3000;      // 3 seconds for GSR
@@ -35,6 +40,7 @@ const unsigned long IDLE_DURATION = 31000;    // 31 seconds idle (total ~60s cyc
 
 // Sensor readings storage
 float lastBPM = 0;
+float lastSpO2 = 0;
 float lastTemperature = 0;
 float lastGSR = 0;
 float lastAccelX = 0, lastAccelY = 0, lastAccelZ = 0;
@@ -47,6 +53,7 @@ bool headerPrinted = false;
 // Forward declarations
 void transitionToNextState();
 void handleHeartState(unsigned long elapsed);
+void handleSpO2State(unsigned long elapsed);
 void handleTempState(unsigned long elapsed);
 void handleGyroState(unsigned long elapsed);
 void handleGSRState(unsigned long elapsed);
@@ -73,7 +80,11 @@ void loop() {
     case STATE_HEART:
       handleHeartState(elapsedTime);
       break;
-      
+
+    case STATE_SPO2:
+      handleSpO2State(elapsedTime);
+      break;
+    
     case STATE_TEMP:
       handleTempState(elapsedTime);
       break;
@@ -153,6 +164,51 @@ void handleHeartState(unsigned long elapsed) {
     transitionToNextState();
   }
 }
+
+void handleSpO2State(unsigned long elapsed) {
+  static bool initialized = false;
+  if (elapsed == 0 || !initialized) {
+    Serial.println("[STATE] Reading SpO2 for 10 seconds...");
+    Wire.end(); delay(100);
+    if (!heartSensor.begin(0x64, 100000, true)) {
+      Serial.println("ERROR: SpO2 init failed!");
+      lastSpO2 = 0;
+      transitionToNextState();
+      return;
+    }
+    if (!heartSensor.configureForSpO2()) {
+      Serial.println("ERROR: SpO2 config failed!");
+      transitionToNextState();
+      return;
+    }
+    spo2Calc.clear();
+    initialized = true;
+  }
+
+  uint16_t red, ir;
+  if (heartSensor.readFifoDataDual(red, ir)) {
+      spo2Calc.addSample(red, ir);       
+      static unsigned long lastPrint = 0;
+      // REMOVE BELOW AFTER FINISHED
+      if (millis() - lastPrint >= 500) {
+          heartSensor.printDiagnostics();
+          Serial.print("Red: "); Serial.print(red);
+          Serial.print(" | IR: "); Serial.println(ir);
+          lastPrint = millis();
+      }
+  }
+
+
+  if (elapsed >= 10000) {
+    lastSpO2 = spo2Calc.calculateSpO2();
+    Serial.print("[SPO2] Estimated: ");
+    Serial.print(lastSpO2, 1);
+    Serial.println(" %");
+    initialized = false;
+    transitionToNextState();
+  }
+}
+
 
 void handleTempState(unsigned long elapsed) {
   static bool initialized = false;
@@ -348,7 +404,7 @@ void handleIdleState(unsigned long elapsed) {
     // Print CSV header once
     if (!headerPrinted) {
       Serial.println("\n=== CSV OUTPUT ===");
-      Serial.println("Timestamp,BPM,Temperature_C,GSR,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
+      Serial.println("Timestamp,BPM,SpO2,Temperature_C,GSR,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
       headerPrinted = true;
     }
     
@@ -356,6 +412,8 @@ void handleIdleState(unsigned long elapsed) {
     Serial.print(millis());
     Serial.print(",");
     Serial.print(lastBPM, 1);
+    Serial.print(",");
+    Serial.print(lastSpO2, 1);
     Serial.print(",");
     Serial.print(lastTemperature, 2);
     Serial.print(",");
@@ -389,6 +447,9 @@ void transitionToNextState() {
   
   switch (currentState) {
     case STATE_HEART:
+      currentState = STATE_SPO2;
+      break;
+    case STATE_SPO2:
       currentState = STATE_TEMP;
       break;
     case STATE_TEMP:
