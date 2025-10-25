@@ -82,6 +82,10 @@ uint8_t ADPD105::getFifoWordCount() {
     return bytes / 2;                       // convert to 16-bit words
 }
 
+bool ADPD105::readRegisterPublic(uint8_t reg, uint16_t &value) {
+    return readRegister16(reg, value);
+}
+
 
 void ADPD105::printDiagnostics() {
     if (!_initialized) {
@@ -178,7 +182,7 @@ bool ADPD105::configureForHeartRate() {
     }
 
     // 6) LED1 (RED) current
-    if (!writeRegister16(REG_LED1_DRV, 0x2001)) {
+    if (!writeRegister16(REG_LED1_DRV, 0x4001)) {
         Serial.println("ADPD105: LED1_DRV config failed");
         return false;
     }
@@ -189,11 +193,18 @@ bool ADPD105::configureForHeartRate() {
         return false;
     }
 
+    // Clear FIFO and status before starting
+    writeRegister16(REG_FIFO_CLR, 0x0001);
+    delay(5);
+    writeRegister16(REG_INT_STATUS, 0xFFFF); // clear interrupts
+
     // 8) Normal mode (start state machine)
     if (!writeRegister16(REG_MODE, 0x0002)) {
         Serial.println("ADPD105: Normal mode start failed");
         return false;
     }
+    delay(50);
+    writeRegister16(REG_FIFO_CLR, 0x0001);
 
     return true;
 }

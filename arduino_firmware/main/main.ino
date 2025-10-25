@@ -107,6 +107,11 @@ void loop() {
 
 void handleHeartState(unsigned long elapsed) {
   static bool initialized = false;
+  uint16_t ledReg;
+  heartSensor.readRegisterPublic(ADPD105::REG_LED1_DRV, ledReg);
+  Serial.print("LED1_DRV = 0x");
+  Serial.println(ledReg, HEX);
+
   
   if (elapsed == 0 || !initialized) {
     Serial.println("[STATE] Reading Heart Rate for 20 seconds...");
@@ -140,6 +145,7 @@ void handleHeartState(unsigned long elapsed) {
   // Continuously collect heart samples
   uint16_t sample;
   if (heartSensor.readFifoData(sample)) {
+    Serial.println(sample);
     hrCalc.addSample(millis(), sample);
   }
   
