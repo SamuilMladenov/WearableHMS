@@ -1,6 +1,7 @@
 #include "HeartRateCalculator.h"
 #include <algorithm>
 #include <numeric>
+#include <deque>
 
 HeartRateCalculator::HeartRateCalculator(uint16_t threshold)
     : _threshold(threshold),
@@ -83,94 +84,205 @@ std::vector<unsigned long> HeartRateCalculator::findPeaksAdaptive(uint16_t thres
 }
 
 float HeartRateCalculator::calculateBPM() {
-    _hasValidBPM = false;
-    _peakCount = 0;
-
-    if (_samples.size() < 100) {
-        Serial.println("  Not enough samples");
-        return 0.0;
+    // Need enough data (≥ 10s @ 100 Hz → 1000 samples is nice; but allow lower)
+    if (_samples.size() < 300) { // ~3 s minimum
+        _hasValidBPM = false; _bpm = 0; return 0;
     }
 
-    // Compute stats
+    // ---- 0) Basic stats for logs ----
     uint16_t minVal = 65535, maxVal = 0;
-    unsigned long sumVal = 0;
+    double sum = 0.0;
     for (auto &s : _samples) {
         if (s.value < minVal) minVal = s.value;
         if (s.value > maxVal) maxVal = s.value;
-        sumVal += s.value;
+        sum += s.value;
+    }
+    float range = maxVal - minVal;
+    float avg = sum / _samples.size();
+
+    Serial.print(" Signal: min="); Serial.print(minVal);
+    Serial.print(" max=");         Serial.print(maxVal);
+    Serial.print(" avg=");         Serial.print(avg, 2);
+    Serial.print(" range=");       Serial.println(range, 0);
+
+    if (range < 60) { // too flat
+        Serial.println(" Weak signal — skipping BPM calculation");
+        _hasValidBPM = false; _bpm = 0; return 0;
     }
 
-    float avgVal = (float)sumVal / _samples.size();
-    uint16_t signalRange = maxVal - minVal;
+    // ---- 1) Band-pass filter (0.7–5 Hz) for fs=100 Hz ----
+    const float fs = 100.0f, dt = 1.0f / fs;
+    const float fc_hp = 0.7f, fc_lp = 5.0f;
+    const float RC_hp = 1.0f / (2.0f * 3.1415926f * fc_hp);
+    const float RC_lp = 1.0f / (2.0f * 3.1415926f * fc_lp);
+    const float a_hp = RC_hp / (RC_hp + dt);    // y[n] = a*(y[n-1] + x[n]-x[n-1])
+    const float a_lp = dt / (RC_lp + dt);       // y[n] += a*(x - y)
 
-    Serial.print("  Signal: min=");
-    Serial.print(minVal);
-    Serial.print(" max=");
-    Serial.print(maxVal);
-    Serial.print(" avg=");
-    Serial.print(avgVal);
-    Serial.print(" range=");
-    Serial.println(signalRange);
-
-    if (signalRange < 50) {
-        Serial.println("  Signal too small - poor contact");
-        return 0.0;
+    std::vector<float> bp(_samples.size());
+    float yhp = 0.0f, ylp = 0.0f, xprev = (float)_samples[0].value;
+    for (size_t i = 0; i < _samples.size(); ++i) {
+        float x = (float)_samples[i].value;
+        yhp = a_hp * (yhp + x - xprev);
+        xprev = x;
+        ylp += a_lp * (yhp - ylp);
+        bp[i] = ylp;
     }
 
-    // Adaptive threshold: 25% above mean
-    uint16_t adaptiveThreshold = avgVal + (signalRange * 0.25);
-    Serial.print("  Using adaptive threshold: ");
-    Serial.println(adaptiveThreshold);
+    // ---- 2) Robust z-normalization (median/MAD) ----
+    std::vector<float> tmp = bp;
+    std::sort(tmp.begin(), tmp.end());
+    float med = tmp[tmp.size()/2];
 
-    // Detect peaks
-    std::vector<unsigned long> peaks = findPeaksAdaptive(adaptiveThreshold);
-    _peakCount = peaks.size();
-    Serial.print("  Peaks found: ");
-    Serial.println(_peakCount);
-    if (peaks.size() < 3) return 0.0;
+    std::vector<float> dev(tmp.size());
+    for (size_t i = 0; i < tmp.size(); ++i) dev[i] = fabsf(bp[i] - med);
+    std::sort(dev.begin(), dev.end());
+    float mad = dev[dev.size()/2];
+    float scale = (mad < 1e-3f) ? 1.0f : (1.4826f * mad);
 
-    // Build intervals
-    std::vector<unsigned long> intervals;
-    for (size_t i = 1; i < peaks.size(); i++) {
-        unsigned long interval = peaks[i] - peaks[i - 1];
-        if (interval >= 250 && interval <= 2000) intervals.push_back(interval);
+    std::vector<float> z(bp.size());
+    for (size_t i = 0; i < bp.size(); ++i) z[i] = (bp[i] - med) / scale;
+
+    // ---- 3) Candidate peak detection (stricter) ----
+    // Local max + slope flip + amplitude gate
+    std::vector<float> d(bp.size(), 0.0f);
+    for (size_t i = 1; i + 1 < bp.size(); ++i) d[i] = 0.5f * (bp[i+1] - bp[i-1]);
+
+    // Threshold adapts a bit by spread
+    float zThresh = 0.8f;
+    if (range < 150) zThresh = 0.9f;
+    if (range > 350) zThresh = 0.6f;
+
+    // Refractory limits (ms)
+    const unsigned long MIN_REFR_MS = 420;   // was 320 → raise to kill dicrotic doubles
+    const unsigned long MAX_REFR_MS = 1200;
+    unsigned long dynRefr = 450;
+
+    struct Peak { size_t idx; unsigned long t; float z; };
+    std::vector<Peak> cand;
+
+    for (size_t i = 2; i + 2 < z.size(); ++i) {
+        bool localMax = (bp[i] > bp[i-1] && bp[i] > bp[i+1]);
+        bool slopeFlip = (d[i-1] > 0.0f && d[i+1] < 0.0f);
+        if (!localMax || !slopeFlip) continue;
+        if (z[i] < zThresh) continue;
+
+        // small local prominence via window median
+        size_t w = 15; // +/-150 ms
+        size_t a = (i > w ? i - w : 0), b = std::min(z.size()-1, i + w);
+        std::vector<float> win(z.begin()+a, z.begin()+b+1);
+        std::nth_element(win.begin(), win.begin()+win.size()/2, win.end());
+        float locMed = win[win.size()/2];
+        if (z[i] < locMed + 0.6f) continue;
+
+        cand.push_back({ i, _samples[i].timestamp, z[i] });
     }
 
-    if (intervals.size() < 2) {
-        Serial.println("  Not enough valid intervals");
-        return 0.0;
+    if (cand.size() < 2) { _hasValidBPM = false; _bpm = 0; return 0; }
+
+    // ---- 4) Merge-close-peaks (< 450 ms) → keep the stronger z ----
+    std::vector<Peak> peaks;
+    for (size_t k = 0; k < cand.size(); ++k) {
+        if (peaks.empty()) { peaks.push_back(cand[k]); continue; }
+        unsigned long dt_ms = cand[k].t - peaks.back().t;
+        if (dt_ms < 450) {
+            // keep the higher z within this cluster
+            if (cand[k].z > peaks.back().z) peaks.back() = cand[k];
+        } else {
+            peaks.push_back(cand[k]);
+        }
     }
 
-    // Median filter: remove extreme 10% on each side
-    std::sort(intervals.begin(), intervals.end());
-    if (intervals.size() > 5) {
-        size_t cut = intervals.size() / 10;
-        intervals = std::vector<unsigned long>(intervals.begin() + cut, intervals.end() - cut);
+    // Extra guard: if any residual pairs closer than MIN_REFR_MS, drop the weaker
+    std::vector<Peak> peaks2;
+    for (size_t i = 0; i < peaks.size(); ++i) {
+        if (peaks2.empty()) { peaks2.push_back(peaks[i]); continue; }
+        unsigned long dt_ms = peaks[i].t - peaks2.back().t;
+        if (dt_ms < MIN_REFR_MS) {
+            if (peaks[i].z > peaks2.back().z) peaks2.back() = peaks[i];
+        } else {
+            peaks2.push_back(peaks[i]);
+        }
+    }
+    peaks.swap(peaks2);
+
+    Serial.print(" Peaks found (after merge): ");
+    Serial.println(peaks.size());
+    if (peaks.size() < 3) { _hasValidBPM = false; _bpm = 0; return 0; }
+
+    // ---- 5) RR median BPM ----
+    std::vector<float> rr;
+    rr.reserve(peaks.size() - 1);
+    for (size_t i = 1; i < peaks.size(); ++i) rr.push_back((float)(peaks[i].t - peaks[i-1].t));
+    std::sort(rr.begin(), rr.end());
+    float rr_med = rr[rr.size()/2];
+    float bpm_median = 60000.0f / rr_med;
+
+    Serial.print(" Median interval: "); Serial.print(rr_med, 2);
+    Serial.print(" ms -> BPM_med = "); Serial.println(bpm_median, 2);
+
+    // ---- 6) Autocorrelation fallback (recover fundamental if doubled) ----
+    // Use last ~12 s of z (≥ 1200 samples if available)
+    size_t N = z.size();
+    size_t tail = (N > 1200 ? 1200 : N);
+    size_t s0 = N - tail;
+
+    auto acf_at = [&](int lag) -> double {
+        // normalized ACF at lag samples
+        double mean = 0.0;
+        for (size_t i = s0; i < s0 + tail; ++i) mean += z[i];
+        mean /= (double)tail;
+
+        double num = 0.0, den0 = 0.0, den1 = 0.0;
+        for (size_t i = s0; i + lag < s0 + tail; ++i) {
+            double a = z[i]     - mean;
+            double b = z[i+lag] - mean;
+            num  += a * b;
+            den0 += a * a;
+            den1 += b * b;
+        }
+        double den = sqrt(den0 * den1) + 1e-9;
+        return num / den;
+    };
+
+    // Search lags 45..150 samples (~450..1500 ms ⇒ 40..133 bpm)
+    int bestLag = -1; double bestR = -1e9;
+    for (int lag = 45; lag <= 150; ++lag) {
+        double r = acf_at(lag);
+        if (r > bestR) { bestR = r; bestLag = lag; }
+    }
+    float bpm_acf = (bestLag > 0) ? (6000.0f / bestLag) : 0.0f; // 60000 / (lag*10ms) == 6000/lag
+
+    Serial.print(" ACF lag="); Serial.print(bestLag);
+    Serial.print(" r=");      Serial.print(bestR, 3);
+    Serial.print(" -> BPM_acf = "); Serial.println(bpm_acf, 2);
+
+    // ---- 7) Decision: choose BPM ----
+    float bpm_final = bpm_median;
+
+    // If median BPM is high (likely doubled) and ACF is in a plausible adult range, prefer ACF
+    if (bpm_median > 95.0f && bpm_acf >= 50.0f && bpm_acf <= 95.0f) {
+        // Additional consistency: if bpm_median ≈ 2 * bpm_acf (±20%), switch
+        if (fabsf(bpm_median - 2.0f * bpm_acf) / bpm_median < 0.20f) {
+            Serial.println(" Using ACF fallback (doubled peak suspected).");
+            bpm_final = bpm_acf;
+        }
     }
 
-    // Compute median interval
-    std::nth_element(intervals.begin(), intervals.begin() + intervals.size() / 2, intervals.end());
-    float medianInterval = intervals[intervals.size() / 2];
-
-    // Update recent intervals buffer
-    for (auto iv : intervals) {
-        _recentIntervals.push_back(iv);
-        if (_recentIntervals.size() > 20) _recentIntervals.erase(_recentIntervals.begin());
+    // Sanity bounds
+    if (bpm_final < 40 || bpm_final > 180) {
+        Serial.println("[HEART] BPM: INVALID");
+        _hasValidBPM = false; _bpm = 0; return 0;
     }
 
-    // Calculate BPM
-    _bpm = 60000.0 / medianInterval;
-
-    Serial.print("  Median interval: ");
-    Serial.print(medianInterval);
-    Serial.print(" ms  -> BPM = ");
-    Serial.println(_bpm);
-
-    if (_bpm < 30 || _bpm > 200) {
-        Serial.println("  BPM out of range");
-        return 0.0;
-    }
+    // gentle smoothing across calls
+    static bool hadValid = false;
+    if (hadValid) _bpm = 0.7f * _bpm + 0.3f * bpm_final;
+    else _bpm = bpm_final;
 
     _hasValidBPM = true;
+    hadValid = true;
+    Serial.print(" BPM_final = "); Serial.println(_bpm, 1);
     return _bpm;
 }
+
+

@@ -16,6 +16,8 @@ public:
     bool configureForHeartRate();
     bool configureForSpO2();
     bool readRegisterPublic(uint8_t reg, uint16_t &value);
+    bool writeRegisterPublic(uint8_t reg, uint16_t value);
+
 
 
     static const uint8_t REG_STATUS        = 0x00;
