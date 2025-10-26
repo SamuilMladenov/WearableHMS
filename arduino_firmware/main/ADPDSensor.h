@@ -15,6 +15,27 @@ public:
     void reset();
     bool configureForHeartRate();
     bool configureForSpO2();
+    bool readRegisterPublic(uint8_t reg, uint16_t &value);
+    bool writeRegisterPublic(uint8_t reg, uint16_t value);
+
+
+
+    static const uint8_t REG_STATUS        = 0x00;
+    static const uint8_t REG_INT_STATUS    = 0x01;
+    static const uint8_t REG_INT_MASK      = 0x02;
+    static const uint8_t REG_FIFO_THRESH   = 0x06;
+    static const uint8_t REG_FIFO_CLR      = 0x0D;
+    static const uint8_t REG_DEVID         = 0x08;
+    static const uint8_t REG_SW_RESET      = 0x0F;
+    static const uint8_t REG_MODE          = 0x10;
+    static const uint8_t REG_SLOT_EN       = 0x11;
+    static const uint8_t REG_FSAMPLE       = 0x12;
+    static const uint8_t REG_PD_LED_CFG    = 0x14;
+    static const uint8_t REG_NUM_AVG       = 0x15;
+    static const uint8_t REG_LED1_DRV      = 0x34;
+    static const uint8_t REG_LED2_DRV      = 0x35;
+    static const uint8_t REG_CLK32K        = 0x4B;
+    static const uint8_t REG_FIFO_DATA     = 0x60;
     
 private:
     uint8_t _address;
@@ -22,20 +43,8 @@ private:
     bool _initialized;
     
     // Register addresses
-    static const uint8_t REG_STATUS = 0x00;
-    static const uint8_t REG_INT_MASK = 0x01;
-    static const uint8_t REG_FIFO_THRESH = 0x06;
-    static const uint8_t REG_DEVID = 0x08;
-    static const uint8_t REG_SW_RESET = 0x0F;
-    static const uint8_t REG_MODE = 0x10;
-    static const uint8_t REG_SLOT_EN = 0x11;
-    static const uint8_t REG_FSAMPLE = 0x12;
-    static const uint8_t REG_NUM_AVG = 0x15;
-    static const uint8_t REG_PD_LED_CFG = 0x14;
-    static const uint8_t REG_LED1_DRV = 0x23;
-    static const uint8_t REG_LED2_DRV = 0x24;
-    static const uint8_t REG_CLK32K = 0x4B;
-    static const uint8_t REG_FIFO_DATA = 0x60;
+
+
     
     bool writeRegister16(uint8_t reg, uint16_t value);
     bool readRegister16(uint8_t reg, uint16_t &value);

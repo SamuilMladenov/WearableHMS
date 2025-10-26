@@ -44,6 +44,7 @@ public:
 
 private:
     std::vector<HeartSample> _samples;
+    std::vector<unsigned long> _recentIntervals;  // For adaptive refractory
     uint16_t _threshold;
     float _bpm;
     bool _hasValidBPM;

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PORT="/dev/cu.usbmodem1201"
+PORT="/dev/cu.usbmodem11201"
 FQBN="arduino:mbed_nano:nano33ble"
 
 echo "🔨 Compiling SensorTest..."

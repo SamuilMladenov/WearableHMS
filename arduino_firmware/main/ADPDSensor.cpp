@@ -7,10 +7,19 @@ bool ADPD105::begin(uint8_t address, uint32_t i2cSpeed, bool forSpO2) {
     _address = address;
     _i2cSpeed = i2cSpeed;
 
-    Wire.begin();
+    // ✅ Wire.begin() MUST NOT be called repeatedly in continuous operation.
+    // It is already initialized once in setup().
     Wire.setClock(_i2cSpeed);
+    delay(10);
 
-    delay(100);
+    // Stop any previous state machine
+    writeRegister16(REG_MODE, 0x0000);
+    delay(10);
+
+    // Clear FIFO and status flags
+    writeRegister16(REG_FIFO_CLR, 0x0001);
+    delay(5);
+    writeRegister16(REG_INT_STATUS, 0xFFFF);
 
     Serial.print("  Checking ADPD105 connection...");
     if (!checkConnection()) {
@@ -22,7 +31,7 @@ bool ADPD105::begin(uint8_t address, uint32_t i2cSpeed, bool forSpO2) {
 
     Serial.print("  Resetting ADPD105...");
     reset();
-    delay(100);
+    delay(50);
     Serial.println(" OK");
 
     Serial.print("  Configuring ADPD105...  ");
@@ -33,10 +42,12 @@ bool ADPD105::begin(uint8_t address, uint32_t i2cSpeed, bool forSpO2) {
         return false;
     }
 
-    Serial.println(forSpO2 ? "Configuring for SpO2 (RED + IR LEDs)" : "Configuring for Heart Rate (RED LED only)");
+    Serial.println(forSpO2 ? "Configuring for SpO2 (RED + IR LEDs)" 
+                           : "Configuring for Heart Rate (RED LED only)");
     _initialized = true;
     return true;
 }
+
 
 
 bool ADPD105::readFifoData(uint16_t &sample) {
@@ -82,6 +93,13 @@ uint8_t ADPD105::getFifoWordCount() {
     return bytes / 2;                       // convert to 16-bit words
 }
 
+bool ADPD105::readRegisterPublic(uint8_t reg, uint16_t &value) {
+    return readRegister16(reg, value);
+}
+bool ADPD105::writeRegisterPublic(uint8_t reg, uint16_t value) {
+    return writeRegister16(reg, value);
+}
+
 
 void ADPD105::printDiagnostics() {
     if (!_initialized) {
@@ -94,9 +112,15 @@ void ADPD105::printDiagnostics() {
 }
 
 void ADPD105::reset() {
-    writeRegister16(REG_SW_RESET, 0x0001);
-    delay(100);
+    writeRegister16(REG_MODE, 0x0000);     // stop state machine first
+    delay(5);
+    writeRegister16(REG_SW_RESET, 0x0001); // issue soft reset
+    delay(50);
+    writeRegister16(REG_FIFO_CLR, 0x0001); // clear FIFO
+    delay(5);
+    writeRegister16(REG_INT_STATUS, 0xFFFF); // clear interrupts
 }
+
 
 bool ADPD105::writeRegister16(uint8_t reg, uint16_t value) {
     Wire.beginTransmission(_address);
@@ -166,7 +190,7 @@ bool ADPD105::configureForHeartRate() {
     }
 
     // 4) No averaging (1x) on Slot A
-    if (!writeRegister16(REG_NUM_AVG, 0x0000)) {
+    if (!writeRegister16(REG_NUM_AVG, 0x1111)) {
         Serial.println("ADPD105: NUM_AVG config failed");
         return false;
     }
@@ -178,7 +202,7 @@ bool ADPD105::configureForHeartRate() {
     }
 
     // 6) LED1 (RED) current
-    if (!writeRegister16(REG_LED1_DRV, 0x2001)) {
+    if (!writeRegister16(REG_LED1_DRV, 0x4001)) {
         Serial.println("ADPD105: LED1_DRV config failed");
         return false;
     }
@@ -189,11 +213,18 @@ bool ADPD105::configureForHeartRate() {
         return false;
     }
 
+    // Clear FIFO and status before starting
+    writeRegister16(REG_FIFO_CLR, 0x0001);
+    delay(5);
+    writeRegister16(REG_INT_STATUS, 0xFFFF); // clear interrupts
+
     // 8) Normal mode (start state machine)
     if (!writeRegister16(REG_MODE, 0x0002)) {
         Serial.println("ADPD105: Normal mode start failed");
         return false;
     }
+    delay(50);
+    writeRegister16(REG_FIFO_CLR, 0x0001);
 
     return true;
 }
