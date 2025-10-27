@@ -143,17 +143,14 @@ float HeartRateCalculator::calculateBPM() {
     for (size_t i = 0; i < bp.size(); ++i) z[i] = (bp[i] - med) / scale;
 
     // ---- 3) Candidate peak detection (stricter) ----
-    // Local max + slope flip + amplitude gate
     std::vector<float> d(bp.size(), 0.0f);
     for (size_t i = 1; i + 1 < bp.size(); ++i) d[i] = 0.5f * (bp[i+1] - bp[i-1]);
 
-    // Threshold adapts a bit by spread
     float zThresh = 0.8f;
     if (range < 150) zThresh = 0.9f;
     if (range > 350) zThresh = 0.6f;
 
-    // Refractory limits (ms)
-    const unsigned long MIN_REFR_MS = 420;   // was 320 → raise to kill dicrotic doubles
+    const unsigned long MIN_REFR_MS = 420;
     const unsigned long MAX_REFR_MS = 1200;
     unsigned long dynRefr = 450;
 
@@ -166,8 +163,7 @@ float HeartRateCalculator::calculateBPM() {
         if (!localMax || !slopeFlip) continue;
         if (z[i] < zThresh) continue;
 
-        // small local prominence via window median
-        size_t w = 15; // +/-150 ms
+        size_t w = 15;
         size_t a = (i > w ? i - w : 0), b = std::min(z.size()-1, i + w);
         std::vector<float> win(z.begin()+a, z.begin()+b+1);
         std::nth_element(win.begin(), win.begin()+win.size()/2, win.end());
@@ -179,20 +175,19 @@ float HeartRateCalculator::calculateBPM() {
 
     if (cand.size() < 2) { _hasValidBPM = false; _bpm = 0; return 0; }
 
-    // ---- 4) Merge-close-peaks (< 450 ms) → keep the stronger z ----
+    // ---- 4) Merge-close-peaks (< 450 ms) → keep stronger ----
     std::vector<Peak> peaks;
     for (size_t k = 0; k < cand.size(); ++k) {
         if (peaks.empty()) { peaks.push_back(cand[k]); continue; }
         unsigned long dt_ms = cand[k].t - peaks.back().t;
         if (dt_ms < 450) {
-            // keep the higher z within this cluster
             if (cand[k].z > peaks.back().z) peaks.back() = cand[k];
         } else {
             peaks.push_back(cand[k]);
         }
     }
 
-    // Extra guard: if any residual pairs closer than MIN_REFR_MS, drop the weaker
+    // Extra guard: drop residual close pairs
     std::vector<Peak> peaks2;
     for (size_t i = 0; i < peaks.size(); ++i) {
         if (peaks2.empty()) { peaks2.push_back(peaks[i]); continue; }
@@ -209,10 +204,17 @@ float HeartRateCalculator::calculateBPM() {
     Serial.println(peaks.size());
     if (peaks.size() < 3) { _hasValidBPM = false; _bpm = 0; return 0; }
 
-    // ---- 5) RR median BPM ----
+    // ---- 5) RR intervals & BPM ----
     std::vector<float> rr;
     rr.reserve(peaks.size() - 1);
-    for (size_t i = 1; i < peaks.size(); ++i) rr.push_back((float)(peaks[i].t - peaks[i-1].t));
+    for (size_t i = 1; i < peaks.size(); ++i)
+        rr.push_back((float)(peaks[i].t - peaks[i-1].t));
+
+    // Store RR intervals for HRV before sorting
+    _lastRR = rr;
+    Serial.print("[DBG] Stored RR intervals: ");
+    Serial.println(_lastRR.size());
+
     std::sort(rr.begin(), rr.end());
     float rr_med = rr[rr.size()/2];
     float bpm_median = 60000.0f / rr_med;
@@ -221,20 +223,18 @@ float HeartRateCalculator::calculateBPM() {
     Serial.print(" ms -> BPM_med = "); Serial.println(bpm_median, 2);
 
     // ---- 6) Autocorrelation fallback (recover fundamental if doubled) ----
-    // Use last ~12 s of z (≥ 1200 samples if available)
     size_t N = z.size();
     size_t tail = (N > 1200 ? 1200 : N);
     size_t s0 = N - tail;
 
     auto acf_at = [&](int lag) -> double {
-        // normalized ACF at lag samples
         double mean = 0.0;
         for (size_t i = s0; i < s0 + tail; ++i) mean += z[i];
         mean /= (double)tail;
 
         double num = 0.0, den0 = 0.0, den1 = 0.0;
         for (size_t i = s0; i + lag < s0 + tail; ++i) {
-            double a = z[i]     - mean;
+            double a = z[i] - mean;
             double b = z[i+lag] - mean;
             num  += a * b;
             den0 += a * a;
@@ -244,37 +244,31 @@ float HeartRateCalculator::calculateBPM() {
         return num / den;
     };
 
-    // Search lags 45..150 samples (~450..1500 ms ⇒ 40..133 bpm)
     int bestLag = -1; double bestR = -1e9;
     for (int lag = 45; lag <= 150; ++lag) {
         double r = acf_at(lag);
         if (r > bestR) { bestR = r; bestLag = lag; }
     }
-    float bpm_acf = (bestLag > 0) ? (6000.0f / bestLag) : 0.0f; // 60000 / (lag*10ms) == 6000/lag
+    float bpm_acf = (bestLag > 0) ? (6000.0f / bestLag) : 0.0f;
 
     Serial.print(" ACF lag="); Serial.print(bestLag);
     Serial.print(" r=");      Serial.print(bestR, 3);
     Serial.print(" -> BPM_acf = "); Serial.println(bpm_acf, 2);
 
-    // ---- 7) Decision: choose BPM ----
+    // ---- 7) Decision ----
     float bpm_final = bpm_median;
-
-    // If median BPM is high (likely doubled) and ACF is in a plausible adult range, prefer ACF
     if (bpm_median > 95.0f && bpm_acf >= 50.0f && bpm_acf <= 95.0f) {
-        // Additional consistency: if bpm_median ≈ 2 * bpm_acf (±20%), switch
         if (fabsf(bpm_median - 2.0f * bpm_acf) / bpm_median < 0.20f) {
             Serial.println(" Using ACF fallback (doubled peak suspected).");
             bpm_final = bpm_acf;
         }
     }
 
-    // Sanity bounds
     if (bpm_final < 40 || bpm_final > 180) {
         Serial.println("[HEART] BPM: INVALID");
         _hasValidBPM = false; _bpm = 0; return 0;
     }
 
-    // gentle smoothing across calls
     static bool hadValid = false;
     if (hadValid) _bpm = 0.7f * _bpm + 0.3f * bpm_final;
     else _bpm = bpm_final;
@@ -286,3 +280,81 @@ float HeartRateCalculator::calculateBPM() {
 }
 
 
+HeartRateCalculator::HRVResult HeartRateCalculator::calculateHRV() {
+    HRVResult result = {0, 0, 0};
+
+    // Need at least a few intervals to even try
+    if (_lastRR.size() < 3) {
+        Serial.println("[HRV] Not enough RR intervals");
+        return result;
+    }
+
+    // --- 1) Start from RR copy ---
+    std::vector<float> rr = _lastRR;
+
+    // --- 2) Global plausibility gate (ms) ---
+    const float RR_MIN = 400.0f;
+    const float RR_MAX = 1200.0f;
+    std::vector<float> rr_rng;
+    rr_rng.reserve(rr.size());
+    for (float r : rr) if (r >= RR_MIN && r <= RR_MAX) rr_rng.push_back(r);
+
+    // --- 3) Local median consistency gate (remove spikes/outliers) ---
+    // Sliding window median (w=5). Keep r if within ±max(20%, 120 ms) of local median.
+    std::vector<float> rr_nn;
+    rr_nn.reserve(rr_rng.size());
+    const int W = 5;
+    for (size_t i = 0; i < rr_rng.size(); ++i) {
+        size_t a = (i >= (size_t)W ? i - W : 0);
+        size_t b = std::min(rr_rng.size() - 1, i + (size_t)W);
+        std::vector<float> win(rr_rng.begin() + a, rr_rng.begin() + b + 1);
+        std::nth_element(win.begin(), win.begin() + win.size() / 2, win.end());
+        float med = win[win.size() / 2];
+        float tol = std::max(0.20f * med, 120.0f); // ±20% or ±120 ms
+        if (fabsf(rr_rng[i] - med) <= tol) rr_nn.push_back(rr_rng[i]);
+    }
+
+    // --- 4) If very few remain, bail out ---
+    int removed = (int)rr.size() - (int)rr_nn.size();
+    if (rr_nn.size() < 5) {
+        Serial.print("[HRV] Too few clean NN intervals (kept ");
+        Serial.print(rr_nn.size());
+        Serial.print(" / ");
+        Serial.print(rr.size());
+        Serial.println("). HRV unreliable.");
+        return result;
+    }
+
+    Serial.print("[HRV] Cleaned NN count: ");
+    Serial.print(rr_nn.size());
+    Serial.print(" (removed ");
+    Serial.print(removed);
+    Serial.println(" outliers)");
+
+    // --- 5) SDNN ---
+    float mean = std::accumulate(rr_nn.begin(), rr_nn.end(), 0.0f) / rr_nn.size();
+    float sumSq = 0.0f;
+    for (float x : rr_nn) { float d = x - mean; sumSq += d * d; }
+    result.SDNN = sqrtf(sumSq / (rr_nn.size() - 1));
+
+    // --- 6) RMSSD + pNN50 ---
+    std::vector<float> diffs;
+    diffs.reserve(rr_nn.size() - 1);
+    for (size_t i = 1; i < rr_nn.size(); ++i) diffs.push_back(rr_nn[i] - rr_nn[i - 1]);
+
+    float sumDiffSq = 0.0f;
+    int nn50 = 0;
+    for (float d : diffs) {
+        sumDiffSq += d * d;
+        if (fabsf(d) > 50.0f) nn50++;
+    }
+    result.RMSSD = sqrtf(sumDiffSq / diffs.size());
+    result.pNN50 = (100.0f * nn50) / diffs.size();
+
+    Serial.println("[HRV] Metrics (cleaned NN):");
+    Serial.print("  SDNN: ");  Serial.print(result.SDNN, 1);  Serial.println(" ms");
+    Serial.print("  RMSSD: "); Serial.print(result.RMSSD, 1); Serial.println(" ms");
+    Serial.print("  pNN50: "); Serial.print(result.pNN50, 1); Serial.println(" %");
+
+    return result;
+}

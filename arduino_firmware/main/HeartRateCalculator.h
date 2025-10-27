@@ -10,6 +10,13 @@ struct HeartSample {
 
 class HeartRateCalculator {
 public:
+
+    struct HRVResult {
+            float SDNN;   // Standard deviation of NN intervals
+            float RMSSD;  // Root mean square of successive differences
+            float pNN50;  // % of successive RR differences > 50 ms
+        };
+
     HeartRateCalculator(uint16_t threshold = 500);
     
     // Add a sample to the collection
@@ -17,6 +24,9 @@ public:
     
     // Calculate BPM from collected samples
     float calculateBPM();
+
+    // Calculate HRV metrics from collected samples
+    HRVResult calculateHRV();
     
     // Clear all samples
     void clearSamples();
@@ -49,7 +59,10 @@ private:
     float _bpm;
     bool _hasValidBPM;
     uint16_t _peakCount;
-    
+
+    // Store RR intervals for HRV
+    std::vector<float> _lastRR;
+
     // Find peaks in the sample data
     std::vector<unsigned long> findPeaks();
     
