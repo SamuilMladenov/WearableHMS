@@ -5,7 +5,6 @@
 #include "HeartRateCalculator.h"
 #include "SpO2Calculator.h"
 
-
 // Sensor objects
 ADPD105 heartSensor;
 MLX90614 thermoSensor;
@@ -55,18 +54,30 @@ void handleTempState(unsigned long elapsed);
 void handleGyroState(unsigned long elapsed);
 void handleGSRState(unsigned long elapsed);
 void handleIdleState(unsigned long elapsed);
+void waitForUserStillness();
 
 void setup() {
-  delay(2000); // Bootloader delay
+  delay(2000);
   Serial.begin(115200);
   while (!Serial);
 
   Serial.println("Initializing Wearable HMS...");
   Serial.println("Sensors will run sequentially to avoid I2C conflicts.\n");
 
-  Wire.begin();             // Initialize I2C once
-  Wire.setClock(100000);    // Safe speed for all sensors
+  Wire.begin();          
+  Wire.setClock(100000);
   delay(20);
+
+  // Initialize the MPU6050 first, since rest detection depends on it
+  Serial.println("Initializing motion sensor...");
+  if (!gyroSensor.begin(0x68)) {
+    if (!gyroSensor.begin(0x69)) {
+      Serial.println("ERROR: MPU6050 initialization failed!");
+    }
+  }
+
+  // Wait for the user to be still before starting the measurement sequence
+  waitForUserStillness();
 
   stateStartTime = millis();
 }
@@ -87,148 +98,160 @@ void loop() {
   delay(10);
 }
 
+// Waits until the user is still for a few seconds before allowing measurement
+void waitForUserStillness() {
+  Serial.println("Waiting for user to be still...");
+  unsigned long lastPrint = 0;
+
+  while (true) {
+    gyroSensor.updateMotionState();
+    if (gyroSensor.isAtRest()) {
+      Serial.println("User is at rest. Starting measurements...\n");
+      break;
+    }
+
+    // Periodically print motion info for feedback
+    unsigned long now = millis();
+    if (now - lastPrint >= 1000) {
+      Serial.print("Stillness check -> ΔAccRMS: ");
+      Serial.print(gyroSensor.getAccelRMS(), 4);
+      Serial.print(" g | ΔGyroRMS: ");
+      Serial.print(gyroSensor.getGyroRMS(), 2);
+      Serial.println(" °/s");
+      
+      lastPrint = now;
+    }
+
+    delay(200);
+  }
+}
+
 void handleHeartState(unsigned long elapsed) {
-    static bool initialized = false;
-    static unsigned long nextTs = 0;
-    const unsigned long SAMPLE_PERIOD_MS = 10; // FSAMPLE=100 Hz -> 10 ms
+  static bool initialized = false;
+  static unsigned long nextTs = 0;
+  const unsigned long SAMPLE_PERIOD_MS = 10;
 
-    if (elapsed == 0 || !initialized) {
-        Serial.println("[STATE] Reading Heart Rate for 20 seconds...");
+  if (elapsed == 0 || !initialized) {
+    Serial.println("[STATE] Reading Heart Rate for 20 seconds...");
+    heartSensor.reset();
+    delay(20);
 
-        // Clean start
-        heartSensor.reset();
-        delay(20);
-
-        bool success = false;
-        for (int i = 0; i < 3; i++) {
-            if (heartSensor.begin(0x64, 100000)) { success = true; break; }
-            Serial.print(" Retry "); Serial.println(i + 1);
-            delay(150);
-        }
-        if (!success) {
-            Serial.println("ERROR: Heart sensor initialization failed!");
-            lastBPM = 0;
-            transitionToNextState();
-            return;
-        }
-
-        // One-time FIFO flush on entry
-        heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
-        delay(5);
-        heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
-
-        hrCalc.clearSamples();
-        initialized = true;
-        nextTs = millis();
+    bool success = false;
+    for (int i = 0; i < 3; i++) {
+      if (heartSensor.begin(0x64, 100000)) { success = true; break; }
+      Serial.print(" Retry "); Serial.println(i + 1);
+      delay(150);
+    }
+    if (!success) {
+      Serial.println("ERROR: Heart sensor initialization failed!");
+      lastBPM = 0;
+      transitionToNextState();
+      return;
     }
 
-    // Read ALL available samples this loop with regular 10 ms spacing
-    uint8_t words = heartSensor.getFifoWordCount();
+    heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
+    delay(5);
+    heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
+    hrCalc.clearSamples();
+    initialized = true;
+    nextTs = millis();
+  }
 
+  uint8_t words = heartSensor.getFifoWordCount();
 
-    // Overflow guard: if almost full, do a single resync
-    if (words > 60) {
-        Serial.println("[HR] FIFO near overflow -> resync");
-        heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0000);
-        delay(5);
-        heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
-        delay(5);
-        heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
-        heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0002);
-        return;
+  if (words > 60) {
+    Serial.println("[HR] FIFO near overflow -> resync");
+    heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0000);
+    delay(5);
+    heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
+    delay(5);
+    heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
+    heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0002);
+    return;
+  }
+
+  for (uint8_t i = 0; i < words; i++) {
+    uint16_t sample;
+    if (!heartSensor.readFifoData(sample)) break;
+    if (sample >= 50 && sample <= 16380) {
+      hrCalc.addSample(nextTs, sample);
+      nextTs += SAMPLE_PERIOD_MS;
     }
+  }
 
-    for (uint8_t i = 0; i < words; i++) {
-        uint16_t sample;
-        if (!heartSensor.readFifoData(sample)) break;
+  if (elapsed >= HEART_DURATION) {
+    hrCalc.printSampleStats();
+    lastBPM = hrCalc.calculateBPM();
+    Serial.print("[HEART] BPM: ");
+    if (hrCalc.hasValidBPM()) Serial.println(lastBPM, 1);
+    else { Serial.println("INVALID"); lastBPM = 0; }
 
-        // Simple corruption guard
-        if (sample >= 50 && sample <= 16380) {
-            hrCalc.addSample(nextTs, sample);
-            nextTs += SAMPLE_PERIOD_MS;
-        }
-    }
-
-    // --- End of state window ---
-    if (elapsed >= HEART_DURATION) {
-        hrCalc.printSampleStats();
-        lastBPM = hrCalc.calculateBPM();
-        Serial.print("[HEART] BPM: ");
-        if (hrCalc.hasValidBPM()) Serial.println(lastBPM, 1);
-        else { Serial.println("INVALID"); lastBPM = 0; }
-
-        initialized = false;
-        transitionToNextState();
-    }
+    initialized = false;
+    transitionToNextState();
+  }
 }
 
 void handleSpO2State(unsigned long elapsed) {
-    static bool initialized = false;
-    static unsigned long nextTs = 0;
-    const unsigned long SAMPLE_PERIOD_MS = 10; // FSAMPLE=100 Hz -> 10 ms per (RED,IR) pair
+  static bool initialized = false;
+  static unsigned long nextTs = 0;
+  const unsigned long SAMPLE_PERIOD_MS = 10;
 
-    if (elapsed == 0 || !initialized) {
-        Serial.println("[STATE] Reading SpO2 for 10 seconds...");
+  if (elapsed == 0 || !initialized) {
+    Serial.println("[STATE] Reading SpO2 for 10 seconds...");
 
-        if (!heartSensor.begin(0x64, 100000, true)) {
-            Serial.println("ERROR: SpO2 init failed!");
-            lastSpO2 = 0;
-            transitionToNextState();
-            return;
-        }
-
-        // One-time FIFO flush on entry
-        heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
-        delay(5);
-        heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
-
-        spo2Calc.clear();
-        initialized = true;
-        nextTs = millis();
+    if (!heartSensor.begin(0x64, 100000, true)) {
+      Serial.println("ERROR: SpO2 init failed!");
+      lastSpO2 = 0;
+      transitionToNextState();
+      return;
     }
 
-    // Each valid packet contains 2 words (RED, IR)
-    uint8_t words = heartSensor.getFifoWordCount();
+    heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
+    delay(5);
+    heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
 
-    // Overflow guard
-    if (words > 60) {
-        Serial.println("[SpO2] FIFO near overflow -> resync");
-        heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0000);
-        delay(5);
-        heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
-        delay(5);
-        heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
-        heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0002);
-        return;
+    spo2Calc.clear();
+    initialized = true;
+    nextTs = millis();
+  }
+
+  uint8_t words = heartSensor.getFifoWordCount();
+
+  if (words > 60) {
+    Serial.println("[SpO2] FIFO near overflow -> resync");
+    heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0000);
+    delay(5);
+    heartSensor.writeRegisterPublic(ADPD105::REG_FIFO_CLR, 0x0001);
+    delay(5);
+    heartSensor.writeRegisterPublic(ADPD105::REG_INT_STATUS, 0xFFFF);
+    heartSensor.writeRegisterPublic(ADPD105::REG_MODE, 0x0002);
+    return;
+  }
+
+  uint8_t pairs = words / 2;
+  for (uint8_t i = 0; i < pairs; i++) {
+    uint16_t red, ir;
+    if (!heartSensor.readFifoDataDual(red, ir)) break;
+    if (red >= 50 && red <= 16380 && ir >= 50 && ir <= 16380) {
+      spo2Calc.addSample(red, ir);
+      nextTs += SAMPLE_PERIOD_MS;
     }
+  }
 
-    uint8_t pairs = words / 2;
-    for (uint8_t i = 0; i < pairs; i++) {
-        uint16_t red, ir;
-        if (!heartSensor.readFifoDataDual(red, ir)) break;
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint >= 500) {
+    heartSensor.printDiagnostics();
+    lastPrint = millis();
+  }
 
-        if (red >= 50 && red <= 16380 && ir >= 50 && ir <= 16380) {
-            spo2Calc.addSample(red, ir);
-            nextTs += SAMPLE_PERIOD_MS;
-        }
-    }
-
-    // (Optional lightweight diagnostics)
-    static unsigned long lastPrint = 0;
-    if (millis() - lastPrint >= 500) {
-        heartSensor.printDiagnostics();
-        lastPrint = millis();
-    }
-
-    if (elapsed >= SPO2_DURATION) {
-        lastSpO2 = spo2Calc.calculateSpO2();
-        Serial.print("[SPO2] Estimated: ");
-        Serial.print(lastSpO2, 1);
-        Serial.println(" %");
-
-        initialized = false;
-        transitionToNextState();
-    }
+  if (elapsed >= SPO2_DURATION) {
+    lastSpO2 = spo2Calc.calculateSpO2();
+    Serial.print("[SPO2] Estimated: ");
+    Serial.print(lastSpO2, 1);
+    Serial.println(" %");
+    initialized = false;
+    transitionToNextState();
+  }
 }
 
 void handleTempState(unsigned long elapsed) {
@@ -430,6 +453,9 @@ void handleIdleState(unsigned long elapsed) {
   if (elapsed >= IDLE_DURATION) {
     Serial.println("\n[STATE] Starting new measurement cycle...\n");
     outputPrinted = false;
+
+    // Before restarting, again check for stillness
+    waitForUserStillness();
     transitionToNextState();
   }
 }
@@ -446,4 +472,3 @@ void transitionToNextState() {
     case STATE_IDLE:  currentState = STATE_HEART; break;
   }
 }
-
