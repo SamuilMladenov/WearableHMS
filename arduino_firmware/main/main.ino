@@ -29,7 +29,7 @@ SensorState currentState = STATE_HEART;
 unsigned long stateStartTime = 0;
 
 // Timing constants
-const unsigned long HEART_DURATION = 20000;
+const unsigned long HEART_DURATION = 40000;
 const unsigned long SPO2_DURATION  = 10000;
 const unsigned long TEMP_DURATION  = 3000;
 const unsigned long GYRO_DURATION  = 3000;
@@ -45,6 +45,11 @@ float lastAccelX = 0, lastAccelY = 0, lastAccelZ = 0;
 float lastGyroX = 0, lastGyroY = 0, lastGyroZ = 0;
 bool dataReady = false;
 bool headerPrinted = false;
+
+// HRV metrics
+float lastHRV_RMSSD = 0;
+float lastHRV_SDNN = 0;
+float lastHRV_pNN50 = 0;
 
 // Forward declarations
 void transitionToNextState();
@@ -132,7 +137,7 @@ void handleHeartState(unsigned long elapsed) {
   const unsigned long SAMPLE_PERIOD_MS = 10;
 
   if (elapsed == 0 || !initialized) {
-    Serial.println("[STATE] Reading Heart Rate for 20 seconds...");
+    Serial.println("[STATE] Reading Heart Rate for 40 seconds...");
     heartSensor.reset();
     delay(20);
 
@@ -183,8 +188,26 @@ void handleHeartState(unsigned long elapsed) {
     hrCalc.printSampleStats();
     lastBPM = hrCalc.calculateBPM();
     Serial.print("[HEART] BPM: ");
-    if (hrCalc.hasValidBPM()) Serial.println(lastBPM, 1);
-    else { Serial.println("INVALID"); lastBPM = 0; }
+    if (hrCalc.hasValidBPM()) {
+      Serial.println(lastBPM, 1);
+
+      // ➕ Calculate HRV metrics and store them
+      auto hrv = hrCalc.calculateHRV();
+      lastHRV_RMSSD = hrv.RMSSD;
+      lastHRV_SDNN = hrv.SDNN;
+      lastHRV_pNN50 = hrv.pNN50;
+
+      Serial.print("[HRV] RMSSD: "); Serial.println(lastHRV_RMSSD, 1);
+      Serial.print("[HRV] SDNN: ");  Serial.println(lastHRV_SDNN, 1);
+      Serial.print("[HRV] pNN50: "); Serial.println(lastHRV_pNN50, 1);
+    } 
+    else {
+      Serial.println("INVALID");
+      lastBPM = 0;
+      lastHRV_RMSSD = 0;
+      lastHRV_SDNN = 0;
+      lastHRV_pNN50 = 0;
+    }
 
     initialized = false;
     transitionToNextState();
@@ -420,7 +443,7 @@ void handleIdleState(unsigned long elapsed) {
   if (!outputPrinted && dataReady) {
     if (!headerPrinted) {
       Serial.println("\n=== CSV OUTPUT ===");
-      Serial.println("Timestamp,BPM,SpO2,Temperature_C,GSR,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
+      Serial.println("Timestamp,BPM,SpO2,Temperature_C,GSR,HRV_RMSSD,HRV_SDNN,HRV_pNN50,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
       headerPrinted = true;
     }
     
@@ -433,6 +456,12 @@ void handleIdleState(unsigned long elapsed) {
     Serial.print(lastTemperature, 2);
     Serial.print(",");
     Serial.print(lastGSR, 2);
+    Serial.print(",");
+    Serial.print(lastHRV_RMSSD, 1);
+    Serial.print(",");
+    Serial.print(lastHRV_SDNN, 1);
+    Serial.print(",");
+    Serial.print(lastHRV_pNN50, 1);
     Serial.print(",");
     Serial.print(lastAccelX, 2);
     Serial.print(",");
