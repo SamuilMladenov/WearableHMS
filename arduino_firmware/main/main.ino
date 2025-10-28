@@ -45,6 +45,8 @@ float lastAccelX = 0, lastAccelY = 0, lastAccelZ = 0;
 float lastGyroX = 0, lastGyroY = 0, lastGyroZ = 0;
 bool dataReady = false;
 bool headerPrinted = false;
+float lastStressLevel = 0;
+
 
 // HRV metrics
 float lastHRV_RMSSD = 0;
@@ -441,9 +443,24 @@ void handleIdleState(unsigned long elapsed) {
   static bool outputPrinted = false;
   
   if (!outputPrinted && dataReady) {
+    // ---- Compute and display stress ----
+    // It is located here since at this point we have all data needed - HRV, GSR, Temperature
+    lastStressLevel = computeStressLevel(lastGSR, lastTemperature, lastHRV_SDNN);
+    Serial.print("[STRESS] Level: ");
+    if (lastStressLevel < 0) {
+      Serial.println("N/A (incomplete data)");
+    } else {
+      Serial.print(lastStressLevel, 1);
+      Serial.print(" / 100 -> ");
+      if (lastStressLevel < 30) Serial.println("Relaxed");
+      else if (lastStressLevel < 60) Serial.println("Mild stress");
+      else if (lastStressLevel < 85) Serial.println("High stress");
+      else Serial.println("Extreme stress");
+    }
+
     if (!headerPrinted) {
       Serial.println("\n=== CSV OUTPUT ===");
-      Serial.println("Timestamp,BPM,SpO2,Temperature_C,GSR,HRV_RMSSD,HRV_SDNN,HRV_pNN50,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
+      Serial.println("Timestamp,BPM,SpO2,Temperature_C,GSR,HRV_RMSSD,HRV_SDNN,HRV_pNN50,StressLevel,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
       headerPrinted = true;
     }
     
@@ -462,6 +479,8 @@ void handleIdleState(unsigned long elapsed) {
     Serial.print(lastHRV_SDNN, 1);
     Serial.print(",");
     Serial.print(lastHRV_pNN50, 1);
+    Serial.print(",");
+    Serial.print(lastStressLevel, 1);
     Serial.print(",");
     Serial.print(lastAccelX, 2);
     Serial.print(",");
@@ -501,3 +520,30 @@ void transitionToNextState() {
     case STATE_IDLE:  currentState = STATE_HEART; break;
   }
 }
+
+float computeStressLevel(float gsr_ohm, float tempC, float hrvSDNN) {
+  // === 1) Handle invalid data ===
+  if (gsr_ohm <= 0 || gsr_ohm > 1e6 || tempC < 20 || tempC > 45 || hrvSDNN <= 0) {
+    return -1; // Invalid / incomplete data
+  }
+
+  // === 2) Normalize individual scores (0 = calm, 1 = stressed) ===
+  // GSR: lower resistance => higher stress
+  float gsrScore = (150000.0 - gsr_ohm) / 100000.0;
+  gsrScore = constrain(gsrScore, 0.0, 1.0);
+
+  // HRV: lower SDNN => higher stress
+  float hrvScore = (50.0 - hrvSDNN) / 30.0;
+  hrvScore = constrain(hrvScore, 0.0, 1.0);
+
+  // Temperature: lower skin temp => higher stress
+  float tempScore = (33.5 - tempC) / 3.0;
+  tempScore = constrain(tempScore, 0.0, 1.0);
+
+  // === 3) Weighted sum ===
+  float stressLevel = (0.45 * gsrScore) + (0.40 * hrvScore) + (0.15 * tempScore);
+  stressLevel = constrain(stressLevel * 100.0, 0.0, 100.0);
+
+  return stressLevel;
+}
+
