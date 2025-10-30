@@ -4,12 +4,15 @@
 #include "GSR.h"
 #include "HeartRateCalculator.h"
 #include "SpO2Calculator.h"
+#include <ArduinoBLE.h>
+#include "BLEManager.h"
 
 // Sensor objects
 ADPD105 heartSensor;
 MLX90614 thermoSensor;
 MPU6050 gyroSensor;
 GSR gsrSensor;
+BLEManager bleManager;
 
 // Calculators
 HeartRateCalculator hrCalc(500);
@@ -83,6 +86,13 @@ void setup() {
     }
   }
 
+  // Start BLE (device name appears in Android scan)
+  if (!ble.begin("WearableHMS")) {
+    Serial.println("ERROR: BLE init failed!");
+  } else {
+    Serial.println("BLE advertising as 'WearableHMS'");
+  }
+
   // Wait for the user to be still before starting the measurement sequence
   waitForUserStillness();
 
@@ -90,6 +100,8 @@ void setup() {
 }
 
 void loop() {
+  ble.poll();
+
   unsigned long currentTime = millis();
   unsigned long elapsedTime = currentTime - stateStartTime;
 
@@ -443,9 +455,12 @@ void handleIdleState(unsigned long elapsed) {
   static bool outputPrinted = false;
   
   if (!outputPrinted && dataReady) {
-    // ---- Compute and display stress ----
-    // It is located here since at this point we have all data needed - HRV, GSR, Temperature
+    static unsigned long cycleID = 0;
+    cycleID++;
+
+    // Compute and display stress
     lastStressLevel = computeStressLevel(lastGSR, lastTemperature, lastHRV_SDNN);
+
     Serial.print("[STRESS] Level: ");
     if (lastStressLevel < 0) {
       Serial.println("N/A (incomplete data)");
@@ -458,45 +473,36 @@ void handleIdleState(unsigned long elapsed) {
       else Serial.println("Extreme stress");
     }
 
-    if (!headerPrinted) {
-      Serial.println("\n=== CSV OUTPUT ===");
-      Serial.println("Timestamp,BPM,SpO2,Temperature_C,GSR,HRV_RMSSD,HRV_SDNN,HRV_pNN50,StressLevel,AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ");
-      headerPrinted = true;
+    // JSON Output
+    String json = "{";
+    json += "\"cycle_id\":" + String(cycleID) + ",";
+    json += "\"timestamp\":" + String(millis()) + ",";
+    json += "\"bpm\":" + String(lastBPM, 6) + ",";
+    json += "\"spo2\":" + String(lastSpO2, 6) + ",";
+    json += "\"temp\":" + String(lastTemperature, 6) + ",";
+    json += "\"gsr\":" + String(lastGSR, 6) + ",";
+    json += "\"hrv_rmssd\":" + String(lastHRV_RMSSD, 6) + ",";
+    json += "\"hrv_sdnn\":" + String(lastHRV_SDNN, 6) + ",";
+    json += "\"hrv_pnn50\":" + String(lastHRV_pNN50, 6) + ",";
+    json += "\"stress\":" + String(lastStressLevel, 6) + ",";
+    json += "\"ax\":" + String(lastAccelX, 6) + ",";
+    json += "\"ay\":" + String(lastAccelY, 6) + ",";
+    json += "\"az\":" + String(lastAccelZ, 6) + ",";
+    json += "\"gx\":" + String(lastGyroX, 6) + ",";
+    json += "\"gy\":" + String(lastGyroY, 6) + ",";
+    json += "\"gz\":" + String(lastGyroZ, 6);
+    json += "}\\n";
+
+    Serial.print(json);  // for now, print to Serial; later you’ll send this via BLE
+
+    // Send to phone via BLE
+    if (!ble.notifyJSON(json)) {
+      Serial.println("[BLE]: BLE notify failed (not connected?)");
     }
-    
-    Serial.print(millis());
-    Serial.print(",");
-    Serial.print(lastBPM, 1);
-    Serial.print(",");
-    Serial.print(lastSpO2, 1);
-    Serial.print(",");
-    Serial.print(lastTemperature, 2);
-    Serial.print(",");
-    Serial.print(lastGSR, 2);
-    Serial.print(",");
-    Serial.print(lastHRV_RMSSD, 1);
-    Serial.print(",");
-    Serial.print(lastHRV_SDNN, 1);
-    Serial.print(",");
-    Serial.print(lastHRV_pNN50, 1);
-    Serial.print(",");
-    Serial.print(lastStressLevel, 1);
-    Serial.print(",");
-    Serial.print(lastAccelX, 2);
-    Serial.print(",");
-    Serial.print(lastAccelY, 2);
-    Serial.print(",");
-    Serial.print(lastAccelZ, 2);
-    Serial.print(",");
-    Serial.print(lastGyroX, 2);
-    Serial.print(",");
-    Serial.print(lastGyroY, 2);
-    Serial.print(",");
-    Serial.println(lastGyroZ, 2);
-    
+
     dataReady = false;
     outputPrinted = true;
-  }
+}
   
   if (elapsed >= IDLE_DURATION) {
     Serial.println("\n[STATE] Starting new measurement cycle...\n");
@@ -522,12 +528,12 @@ void transitionToNextState() {
 }
 
 float computeStressLevel(float gsr_ohm, float tempC, float hrvSDNN) {
-  // === 1) Handle invalid data ===
+  // 1) Handle invalid data 
   if (gsr_ohm <= 0 || gsr_ohm > 1e6 || tempC < 20 || tempC > 45 || hrvSDNN <= 0) {
     return -1; // Invalid / incomplete data
   }
 
-  // === 2) Normalize individual scores (0 = calm, 1 = stressed) ===
+  // 2) Normalize individual scores (0 = calm, 1 = stressed)
   // GSR: lower resistance => higher stress
   float gsrScore = (150000.0 - gsr_ohm) / 100000.0;
   gsrScore = constrain(gsrScore, 0.0, 1.0);
@@ -540,7 +546,7 @@ float computeStressLevel(float gsr_ohm, float tempC, float hrvSDNN) {
   float tempScore = (33.5 - tempC) / 3.0;
   tempScore = constrain(tempScore, 0.0, 1.0);
 
-  // === 3) Weighted sum ===
+  // 3) Weighted sum 
   float stressLevel = (0.45 * gsrScore) + (0.40 * hrvScore) + (0.15 * tempScore);
   stressLevel = constrain(stressLevel * 100.0, 0.0, 100.0);
 
