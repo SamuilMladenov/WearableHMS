@@ -1,0 +1,13 @@
+<resources>
+    <!-- Primary palette -->
+    <color name="tealPrimary">#00897B</color>          <!-- Primary -->
+    <color name="mintSecondary">#80CBC4</color>        <!-- Secondary -->
+    <color name="offWhiteBg">#F9FAFB</color>           <!-- Background -->
+    <color name="coralAccent">#FF7043</color>          <!-- Alerts -->
+    <color name="charcoalText">#212121</color>         <!-- Text -->
+
+    <!-- Accessible variants -->
+    <color name="mintSecondaryDark">#5DB6AE</color>
+    <color name="tealPrimaryDark">#007D71</color>
+    <color name="cardStroke">#9ED6D1</color>
+</resources>

@@ -7,7 +7,7 @@ bool ADPD105::begin(uint8_t address, uint32_t i2cSpeed, bool forSpO2) {
     _address = address;
     _i2cSpeed = i2cSpeed;
 
-    // ✅ Wire.begin() MUST NOT be called repeatedly in continuous operation.
+    // Wire.begin() MUST NOT be called repeatedly in continuous operation.
     // It is already initialized once in setup().
     Wire.setClock(_i2cSpeed);
     delay(10);
