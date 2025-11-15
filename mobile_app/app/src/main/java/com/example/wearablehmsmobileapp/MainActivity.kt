@@ -21,11 +21,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ---- Replace these with your device details ----
     private val TARGET_DEVICE_NAME = "WearableHMS" // e.g., your peripheral's name
-    private val SERVICE_UUID = UUID.fromString("0000xxxx-0000-1000-8000-00805f9b34fb")
-    private val CHARACTERISTIC_UUID = UUID.fromString("0000yyyy-0000-1000-8000-00805f9b34fb")
-    // ------------------------------------------------
+    private val SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+    private val CHARACTERISTIC_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothGatt: BluetoothGatt? = null
@@ -33,10 +32,10 @@ class MainActivity : AppCompatActivity() {
 
     // Simple thresholds (tune freely)
     private object Thresholds {
-        const val HR_HIGH = 100.0
+        const val HR_HIGH = 120.0
         const val SPO2_LOW = 92.0
-        const val TEMP_HIGH = 37.8   // if using skin temp, adjust accordingly
-        const val TEMP_LOW  = 35.0
+        const val TEMP_HIGH = 37.0
+        const val TEMP_LOW  = 34.0
         const val STRESS_HIGH = 70.0
         const val HRV_RMSSD_LOW = 20.0
     }
