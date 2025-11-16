@@ -4,15 +4,15 @@
 #include "GSR.h"
 #include "HeartRateCalculator.h"
 #include "SpO2Calculator.h"
-#include <ArduinoBLE.h>
 #include "BLEManager.h"
+#include <ArduinoBLE.h>
 
 // Sensor objects
 ADPD105 heartSensor;
 MLX90614 thermoSensor;
 MPU6050 gyroSensor;
 GSR gsrSensor;
-BLEManager bleManager;
+BLEManager ble;
 
 // Calculators
 HeartRateCalculator hrCalc(500);
@@ -113,7 +113,7 @@ void loop() {
     case STATE_GSR:   handleGSRState(elapsedTime);   break;
     case STATE_IDLE:  handleIdleState(elapsedTime);  break;
   }
-
+    
   delay(10);
 }
 
@@ -472,37 +472,11 @@ void handleIdleState(unsigned long elapsed) {
       else if (lastStressLevel < 85) Serial.println("High stress");
       else Serial.println("Extreme stress");
     }
-
-    // JSON Output
-    String json = "{";
-    json += "\"cycle_id\":" + String(cycleID) + ",";
-    json += "\"timestamp\":" + String(millis()) + ",";
-    json += "\"bpm\":" + String(lastBPM, 6) + ",";
-    json += "\"spo2\":" + String(lastSpO2, 6) + ",";
-    json += "\"temp\":" + String(lastTemperature, 6) + ",";
-    json += "\"gsr\":" + String(lastGSR, 6) + ",";
-    json += "\"hrv_rmssd\":" + String(lastHRV_RMSSD, 6) + ",";
-    json += "\"hrv_sdnn\":" + String(lastHRV_SDNN, 6) + ",";
-    json += "\"hrv_pnn50\":" + String(lastHRV_pNN50, 6) + ",";
-    json += "\"stress\":" + String(lastStressLevel, 6) + ",";
-    json += "\"ax\":" + String(lastAccelX, 6) + ",";
-    json += "\"ay\":" + String(lastAccelY, 6) + ",";
-    json += "\"az\":" + String(lastAccelZ, 6) + ",";
-    json += "\"gx\":" + String(lastGyroX, 6) + ",";
-    json += "\"gy\":" + String(lastGyroY, 6) + ",";
-    json += "\"gz\":" + String(lastGyroZ, 6);
-    json += "}\\n";
-
-    Serial.print(json);  // for now, print to Serial; later you’ll send this via BLE
-
-    // Send to phone via BLE
-    if (!ble.notifyJSON(json)) {
-      Serial.println("[BLE]: BLE notify failed (not connected?)");
-    }
-
+    sendJsonPacket();
+    
     dataReady = false;
     outputPrinted = true;
-}
+  }
   
   if (elapsed >= IDLE_DURATION) {
     Serial.println("\n[STATE] Starting new measurement cycle...\n");
@@ -513,6 +487,7 @@ void handleIdleState(unsigned long elapsed) {
     transitionToNextState();
   }
 }
+
 
 void transitionToNextState() {
   stateStartTime = millis();
@@ -552,4 +527,40 @@ float computeStressLevel(float gsr_ohm, float tempC, float hrvSDNN) {
 
   return stressLevel;
 }
+
+void sendJsonPacket() {
+    static unsigned long lastSend = 0;
+    if (millis() - lastSend < 1000) return; // 1 Hz
+    lastSend = millis();
+
+    static unsigned long cycleID = 0;
+    cycleID++;
+
+    String json = "{";
+    json += "\"cycle_id\":" + String(cycleID) + ",";
+    json += "\"timestamp\":" + String(millis()) + ",";
+    json += "\"bpm\":" + String(lastBPM, 6) + ",";
+    json += "\"spo2\":" + String(lastSpO2, 6) + ",";
+    json += "\"temp\":" + String(lastTemperature, 6) + ",";
+    json += "\"gsr\":" + String(lastGSR, 6) + ",";
+    json += "\"hrv_rmssd\":" + String(lastHRV_RMSSD, 6) + ",";
+    json += "\"hrv_sdnn\":" + String(lastHRV_SDNN, 6) + ",";
+    json += "\"hrv_pnn50\":" + String(lastHRV_pNN50, 6) + ",";
+    json += "\"stress\":" + String(lastStressLevel, 6) + ",";
+    json += "\"ax\":" + String(lastAccelX, 6) + ",";
+    json += "\"ay\":" + String(lastAccelY, 6) + ",";
+    json += "\"az\":" + String(lastAccelZ, 6) + ",";
+    json += "\"gx\":" + String(lastGyroX, 6) + ",";
+    json += "\"gy\":" + String(lastGyroY, 6) + ",";
+    json += "\"gz\":" + String(lastGyroZ, 6);
+    json += "}\n";  
+
+    Serial.println(json);
+
+    if (!ble.notifyJSON(json)) {
+        Serial.println("[BLE] notify failed");
+    }
+}
+
+
 

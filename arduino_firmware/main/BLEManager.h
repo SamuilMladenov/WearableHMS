@@ -22,10 +22,11 @@ public:
 
 private:
   BLEService _svc;
-  BLECharacteristic _tx;     // Notify-only "TX" (device -> phone)
+  BLECharacteristic _rx;  
+  BLECharacteristic _tx;     
 
   // Chunks are kept conservative to work across phones/MTUs
-  static const size_t kChunkSize = 180;
+  static const size_t kChunkSize = 20;
 
   bool _addAndAdvertise();
   void _sendInChunks(const uint8_t* data, size_t len);

@@ -1,247 +1,276 @@
 package com.example.wearablehmsmobileapp
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
-import android.content.pm.PackageManager
-import android.os.*
+import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import android.view.View
-import android.widget.TextView
+import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import com.example.wearablehmsmobileapp.databinding.ActivityMainBinding
 import org.json.JSONObject
-import java.nio.charset.Charset
-import java.util.*
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val TARGET_DEVICE_NAME = "WearableHMS" // e.g., your peripheral's name
-    private val SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-    private val CHARACTERISTIC_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
-
-
+    // BLE
     private var bluetoothAdapter: BluetoothAdapter? = null
+    private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var bluetoothGatt: BluetoothGatt? = null
-    private var isScanning = false
 
-    // Simple thresholds (tune freely)
-    private object Thresholds {
-        const val HR_HIGH = 120.0
+    // JSON buffer (for chunked BLE packets)
+    private val buffer = StringBuilder()
+
+    // Your Nordic UART UUIDs
+    private val TARGET_DEVICE_NAME = "WearableHMS"
+    private val SERVICE_UUID =
+        UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+    private val CHARACTERISTIC_UUID =
+        UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+
+    // Thresholds
+    object Thresholds {
+        const val HR_HIGH = 100.0
         const val SPO2_LOW = 92.0
-        const val TEMP_HIGH = 37.0
-        const val TEMP_LOW  = 34.0
+        const val TEMP_HIGH = 38.0
         const val STRESS_HIGH = 70.0
-        const val HRV_RMSSD_LOW = 20.0
+        const val HRV_LOW = 30.0
     }
 
-    // Runtime permissions (Android 12+)
-    private val blePermsLauncher = registerForActivityResult(
+    // BLUETOOTH PERMISSIONS
+    private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
-        val granted = perms.values.all { it }
-        if (granted) startScan() else showAlert("Bluetooth permissions denied")
+        if (perms.values.all { it }) startBleScan()
+        else showAlert("Bluetooth permissions denied")
     }
 
+    // ---------------------------------------------------------
+    // onCreate
+    // ---------------------------------------------------------
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        bluetoothAdapter = (getSystemService(BluetoothManager::class.java)).adapter
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+        bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
 
         requestBlePermissions()
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        stopScan()
-        bluetoothGatt?.close()
-    }
-
-    // --- Permissions & scanning ---
+    // ---------------------------------------------------------
+    // BLE PERMISSIONS
+    // ---------------------------------------------------------
     private fun requestBlePermissions() {
-        val needs = mutableListOf<String>()
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
-            needs += Manifest.permission.BLUETOOTH_SCAN
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
-            needs += Manifest.permission.BLUETOOTH_CONNECT
-        // Some devices still need location for scans to work reliably
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)
-            needs += Manifest.permission.ACCESS_FINE_LOCATION
+        val needed = mutableListOf<String>()
 
-        if (needs.isNotEmpty()) blePermsLauncher.launch(needs.toTypedArray())
-        else startScan()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            needed += Manifest.permission.BLUETOOTH_SCAN
+            needed += Manifest.permission.BLUETOOTH_CONNECT
+        } else {
+            needed += Manifest.permission.ACCESS_FINE_LOCATION
+        }
+
+        permissionLauncher.launch(needed.toTypedArray())
     }
 
-    private fun startScan() {
-        if (isScanning) return
-        val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
-        val filters = listOf(ScanFilter.Builder().setDeviceName(TARGET_DEVICE_NAME).build())
+    // ---------------------------------------------------------
+    // BLE SCANNING
+    // ---------------------------------------------------------
+    @SuppressLint("MissingPermission")
+    private fun startBleScan() {
+        showBanner("Scanning for $TARGET_DEVICE_NAME…")
+
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
 
-        isScanning = true
-        scanner.startScan(filters, settings, scanCallback)
-        showAlert("Scanning for $TARGET_DEVICE_NAME…")
-        mainHandler.postDelayed({ stopScan() }, 15000) // safety timeout
-    }
-
-    private fun stopScan() {
-        if (!isScanning) return
-        val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
-        scanner.stopScan(scanCallback)
-        isScanning = false
+        bluetoothLeScanner?.startScan(null, settings, scanCallback)
     }
 
     private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            if (result.device.name == TARGET_DEVICE_NAME) {
-                stopScan()
-                connectGatt(result.device)
+        @SuppressLint("MissingPermission")
+        override fun onScanResult(type: Int, result: ScanResult) {
+            val name = result.device.name ?: return
+
+            Log.d("BLE_SCAN", "Found: $name")
+
+            if (name == TARGET_DEVICE_NAME) {
+                showBanner("Connecting to $name…")
+                bluetoothLeScanner?.stopScan(this)
+
+                result.device.connectGatt(
+                    this@MainActivity,
+                    false,
+                    gattCallback
+                )
             }
         }
     }
 
-    private fun connectGatt(device: BluetoothDevice) {
-        showAlert("Connecting to ${device.name}…")
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
-        bluetoothGatt = device.connectGatt(this, false, gattCallback)
-    }
-
-    // --- GATT & notifications ---
+    // ---------------------------------------------------------
+    // GATT CALLBACKS
+    // ---------------------------------------------------------
     private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+
+        override fun onConnectionStateChange(
+            gatt: BluetoothGatt,
+            status: Int,
+            newState: Int
+        ) {
+            Log.d("BLE", "onConnectionStateChange: status=$status newState=$newState")
+
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                runOnUiThread { showAlert("Discovering services…") }
+                bluetoothGatt = gatt
+                showBanner("Connected • Discovering services…")
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                runOnUiThread { showAlert("Disconnected") }
+                showAlert("Disconnected")
             }
         }
 
+        @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             val service = gatt.getService(SERVICE_UUID)
-            val ch = service?.getCharacteristic(CHARACTERISTIC_UUID)
-
-            if (service == null || ch == null) {
-                runOnUiThread { showAlert("Service/Characteristic not found") }
+            if (service == null) {
+                showAlert("Service not found")
                 return
             }
-            enableNotifications(gatt, ch)
-            runOnUiThread { showAlert("Connected • Waiting for data…") }
-        }
 
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            val bytes = characteristic.value ?: return
-            val jsonStr = bytes.toString(Charset.forName("UTF-8")).trim()
-            Log.d("BLE_JSON", jsonStr)
-            handleIncomingJson(jsonStr)
-        }
-    }
+            val characteristic = service.getCharacteristic(CHARACTERISTIC_UUID)
+            if (characteristic == null) {
+                showAlert("Characteristic not found")
+                return
+            }
 
-    private fun enableNotifications(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
-        gatt.setCharacteristicNotification(characteristic, true)
-        val cccd = characteristic.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
-        cccd?.let {
-            it.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            gatt.writeDescriptor(it)
-        }
-    }
+            Log.d("BLE", "Found notify characteristic")
 
-    // --- JSON handling & UI updates ---
-    private fun handleIncomingJson(jsonStr: String) {
-        try {
-            val obj = JSONObject(jsonStr)
-            val reading = Reading(
-                cycleId   = obj.optInt("cycle_id"),
-                timestamp = obj.optLong("timestamp"),
-                bpm       = obj.optDouble("bpm"),
-                spo2      = obj.optDouble("spo2"),
-                temp      = obj.optDouble("temp"),
-                gsr       = obj.optDouble("gsr"),
-                hrvRmssd  = obj.optDouble("hrv_rmssd"),
-                hrvSdnn   = obj.optDouble("hrv_sdnn"),
-                hrvPnn50  = obj.optDouble("hrv_pnn50"),
-                stress    = obj.optDouble("stress"),
-                ax        = obj.optDouble("ax"),
-                ay        = obj.optDouble("ay"),
-                az        = obj.optDouble("az"),
-                gx        = obj.optDouble("gx"),
-                gy        = obj.optDouble("gy"),
-                gz        = obj.optDouble("gz")
+            runOnUiThread {
+                binding.alertBanner.text = "Connected • Waiting for measurement (~90s)…"
+                binding.alertBanner.visibility = View.VISIBLE
+            }
+
+            gatt.setCharacteristicNotification(characteristic, true)
+
+            val cccd = characteristic.getDescriptor(
+                UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
             )
-            runOnUiThread { updateDashboard(reading) }
-        } catch (e: Exception) {
-            Log.e("JSON_PARSE", "Bad JSON: $jsonStr", e)
-            runOnUiThread { showAlert("Invalid data received") }
+            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(cccd)
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            Log.d("BLE_CCCD", "Descriptor write completed. Status = $status")
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val raw = characteristic.value ?: return
+
+            Log.d("BLE_RAW", raw.joinToString(",") { it.toString() })
+
+            val text = raw.toString(Charsets.UTF_8)
+            Log.d("BLE_JSON", "Chunk: \"$text\"")
+            Log.d("BLE_NOTIFY", "onCharacteristicChanged called")
+
+            buffer.append(text)
+
+            // Try to extract as many complete JSON objects as possible
+            while (true) {
+                // Look for a closing brace
+                val endIndex = buffer.indexOf("}")
+                if (endIndex == -1) {
+                    // No full JSON yet
+                    break
+                }
+
+                val fullJson = buffer.substring(0, endIndex + 1)
+                buffer.delete(0, endIndex + 1)
+
+                Log.d("BLE_JSON", "FULL JSON = $fullJson")
+
+                try {
+                    val obj = JSONObject(fullJson.trim())
+                    // Mark that we actually got data
+                    runOnUiThread {
+                        binding.alertBanner.text = "Measurement received"
+                        binding.alertBanner.visibility = View.VISIBLE
+                    }
+                    updateUI(obj)
+                } catch (e: Exception) {
+                    Log.e("BLE_JSON", "Invalid JSON: $fullJson", e)
+                }
+            }
         }
     }
 
-    private fun updateDashboard(r: Reading) {
-        binding.valueHr.text     = "${r.bpm.round1()} BPM"
-        binding.valueSpo2.text   = "${r.spo2.round1()} %"
-        binding.valueTemp.text   = "${r.temp.round2()} °C"
-        binding.valueGsr.text    = r.gsr.round0().toString()
-        binding.valueHrv.text    = "${r.hrvRmssd.round0()} ms"
-        binding.valueStress.text = r.stress.round1().toString()
+    // ---------------------------------------------------------
+    // UPDATE UI
+    // ---------------------------------------------------------
+    private fun updateUI(json: JSONObject) {
 
-        val issues = mutableListOf<String>()
-        if (r.bpm > Thresholds.HR_HIGH) issues += "High Heart Rate"
-        if (r.spo2 < Thresholds.SPO2_LOW) issues += "Low SpO₂"
-        if (r.temp > Thresholds.TEMP_HIGH) issues += "High Temperature"
-        if (r.temp < Thresholds.TEMP_LOW) issues += "Low Temperature"
-        if (r.stress > Thresholds.STRESS_HIGH) issues += "High Stress"
-        if (r.hrvRmssd < Thresholds.HRV_RMSSD_LOW) issues += "Low HRV"
+        val bpm = json.optDouble("bpm")
+        val spo2 = json.optDouble("spo2")
+        val temp = json.optDouble("temp")
+        val gsr = json.optDouble("gsr")
+        val stress = json.optDouble("stress")
+        val hrv = json.optDouble("hrv_rmssd")
 
-        if (issues.isNotEmpty()) {
-            showAlert("⚠ " + issues.joinToString(" • "))
-        } else {
-            binding.alertBanner.visibility = View.GONE
+        // Update text
+        runOnUiThread {
+            binding.valueHr.text = "${bpm.toInt()} BPM"
+            binding.valueSpo2.text = "${spo2.toInt()} %"
+            binding.valueTemp.text = String.format("%.2f °C", temp)
+            binding.valueGsr.text = gsr.toInt().toString()
+            binding.valueHrv.text = "${hrv.toInt()} ms"
+            binding.valueStress.text = stress.toInt().toString()
         }
 
-        // Optional: color highlights for cards (simple example)
-        setCardState(binding.valueHr, r.bpm > Thresholds.HR_HIGH)
-        setCardState(binding.valueSpo2, r.spo2 < Thresholds.SPO2_LOW)
-        setCardState(binding.valueTemp, r.temp !in Thresholds.TEMP_LOW..Thresholds.TEMP_HIGH)
-        setCardState(binding.valueStress, r.stress > Thresholds.STRESS_HIGH)
+        // Alerts
+        val alerts = mutableListOf<String>()
+
+        if (bpm > Thresholds.HR_HIGH) alerts += "High Heart Rate"
+        if (spo2 < Thresholds.SPO2_LOW) alerts += "Low SpO₂"
+        if (temp > Thresholds.TEMP_HIGH) alerts += "High Temperature"
+        if (stress > Thresholds.STRESS_HIGH) alerts += "High Stress"
+        if (hrv < Thresholds.HRV_LOW) alerts += "Low HRV"
+
+        if (alerts.isNotEmpty()) showAlert(alerts.joinToString(" • "))
     }
 
-    private fun setCardState(valueView: TextView, alert: Boolean) {
-        valueView.setTextColor(
-            if (alert) getColor(android.R.color.holo_red_dark)
-            else getColor(R.color.charcoalText)
-        )
+    // ---------------------------------------------------------
+    // ALERTS & BANNERS
+    // ---------------------------------------------------------
+    private fun showBanner(text: String) {
+        runOnUiThread {
+            binding.alertBanner.text = text
+            binding.alertBanner.visibility = View.VISIBLE
+        }
     }
 
-    private fun showAlert(message: String) {
-        binding.alertBanner.text = message
-        binding.alertBanner.visibility = View.VISIBLE
+    private fun showAlert(text: String) {
+        runOnUiThread {
+            binding.alertBanner.text = text
+            binding.alertBanner.visibility = View.VISIBLE
+
+            binding.alertBanner.postDelayed({
+                binding.alertBanner.visibility = View.GONE
+            }, 3000)
+        }
     }
-
-    // --- Model & helpers ---
-    data class Reading(
-        val cycleId: Int,
-        val timestamp: Long,
-        val bpm: Double,
-        val spo2: Double,
-        val temp: Double,
-        val gsr: Double,
-        val hrvRmssd: Double,
-        val hrvSdnn: Double,
-        val hrvPnn50: Double,
-        val stress: Double,
-        val ax: Double, val ay: Double, val az: Double,
-        val gx: Double, val gy: Double, val gz: Double
-    )
-
-    private fun Double.round1() = String.format(Locale.US, "%.1f", this)
-    private fun Double.round2() = String.format(Locale.US, "%.2f", this)
-    private fun Double.round0() = String.format(Locale.US, "%.0f", this).toInt()
 }
