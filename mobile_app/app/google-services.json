@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1057681554998",
+    "project_id": "wearablehms",
+    "storage_bucket": "wearablehms.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1057681554998:android:eaf44f61ad5073766da297",
+        "android_client_info": {
+          "package_name": "com.example.wearablehmsmobileapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDDprs4_m6zKNyukdAYcvNog61dUYQwGGg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

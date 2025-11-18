@@ -12,7 +12,10 @@ import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.example.wearablehmsmobileapp.databinding.ActivityMainBinding
+import com.google.firebase.firestore.FirebaseFirestore
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.*
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
@@ -24,6 +27,10 @@ class MainActivity : AppCompatActivity() {
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var bluetoothGatt: BluetoothGatt? = null
 
+    // Firebase
+    private lateinit var firestore: FirebaseFirestore
+
+
     // JSON buffer (for chunked BLE packets)
     private val buffer = StringBuilder()
 
@@ -34,6 +41,8 @@ class MainActivity : AppCompatActivity() {
     private val CHARACTERISTIC_UUID =
         UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 
+    // Date formatter for timestamps
+    private val dateFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     // Thresholds
     object Thresholds {
         const val HR_HIGH = 100.0
@@ -61,10 +70,22 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        initializeFirebase()
+
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
 
         requestBlePermissions()
+    }
+
+    private fun initializeFirebase() {
+        try {
+            firestore = FirebaseFirestore.getInstance()
+            Log.d("FIREBASE", "Firestore initialized successfully")
+        } catch (e: Exception) {
+            Log.e("FIREBASE", "Firestore initialization failed", e)
+            showAlert("Firestore initialization failed")
+        }
     }
 
     // ---------------------------------------------------------
@@ -212,12 +233,49 @@ class MainActivity : AppCompatActivity() {
                         binding.alertBanner.visibility = View.VISIBLE
                     }
                     updateUI(obj)
+                    saveToFirebase(obj)
                 } catch (e: Exception) {
                     Log.e("BLE_JSON", "Invalid JSON: $fullJson", e)
                 }
             }
         }
     }
+
+    // ---------------------------------------------------------
+    // SAVE TO FIREBASE
+    // ---------------------------------------------------------
+    private fun saveToFirebase(json: JSONObject) {
+        try {
+            // Convert JSON to Map
+            val dataMap = HashMap<String, Any>()
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                dataMap[key] = json.get(key)
+            }
+
+            // Add metadata
+            dataMap["timestamp"] = System.currentTimeMillis()
+            dataMap["formatted_time"] = dateFormatter.format(Date())
+            dataMap["device_id"] = TARGET_DEVICE_NAME
+
+            // Save to Firestore
+            firestore.collection("measurements")
+                .add(dataMap)
+                .addOnSuccessListener { documentReference ->
+                    Log.d("FIRESTORE", "Measurement saved with ID: ${documentReference.id}")
+                    showBanner("Data saved to cloud ✓")
+                }
+                .addOnFailureListener { e ->
+                    Log.e("FIRESTORE", "Failed to save measurement", e)
+                    showAlert("Failed to save data to cloud")
+                }
+
+        } catch (e: Exception) {
+            Log.e("FIRESTORE", "Error preparing Firestore data", e)
+        }
+    }
+
 
     // ---------------------------------------------------------
     // UPDATE UI
